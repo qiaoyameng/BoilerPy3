@@ -34,6 +34,7 @@ class TextBlock:
     def __init__(self, text: str, contained_text_elements=None, num_words: int = 0, num_words_in_anchor_text: int = 0,
                  num_words_in_wrapped_lines: int = 0, num_wrapped_lines: int = 0, offset_blocks: int = 0) -> None:
         self.is_content = False
+        self.is_code = False
         self.labels = set()
         self.num_full_text_words = 0
         self.tag_level = 0
@@ -78,6 +79,7 @@ class TextBlock:
         self.offset_blocks_end = max(self.offset_blocks_end, next_text_block.offset_blocks_end)
         self._init_densities()
         self.is_content |= next_text_block.is_content
+        self.is_code = self.is_code and next_text_block.is_code
         self.contained_text_elements |= next_text_block.contained_text_elements
         self.num_full_text_words += next_text_block.num_full_text_words
         self.labels |= next_text_block.labels

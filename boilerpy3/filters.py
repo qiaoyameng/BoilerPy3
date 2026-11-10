@@ -230,6 +230,10 @@ class SplitParagraphBlocksFilter(BoilerpipeFilter):
         blocks = doc.text_blocks
         blocks_new = []
         for tb in blocks:
+            if tb.is_code:
+                # never split preformatted code blocks at their (meaningful) newlines
+                blocks_new.append(tb)
+                continue
             text = tb.text
             paragraphs = self.NEWLINE_REGEX.split(text)
             if len(paragraphs) < 2:
@@ -339,7 +343,7 @@ class SimpleBlockFusionProcessor(BoilerpipeFilter):
         prev_block = text_blocks[0]
         blocks_to_remove = []
         for block in text_blocks[1:]:
-            if prev_block.text_density == block.text_density:
+            if prev_block.text_density == block.text_density and not (prev_block.is_code or block.is_code):
                 prev_block.merge_next(block)
                 blocks_to_remove.append(block)
                 changes = True
@@ -367,7 +371,8 @@ class ContentFusion(BoilerpipeFilter):
             blocks_to_remove = []
             for block in text_blocks[1:]:
                 if prev_block.is_content and block.link_density < 0.56 \
-                        and not block.has_label(DefaultLabels.STRICTLY_NOT_CONTENT):
+                        and not block.has_label(DefaultLabels.STRICTLY_NOT_CONTENT) \
+                        and not (prev_block.is_code or block.is_code):
                     prev_block.merge_next(block)
                     blocks_to_remove.append(block)
                     changed_on_pass = True
@@ -404,7 +409,8 @@ class LabelFusion(BoilerpipeFilter):
         prev_block = text_blocks[0]
         blocks_to_remove = []
         for block in text_blocks[1::]:
-            if self.equal_labels(prev_block.labels, block.labels):
+            if not (prev_block.is_code or block.is_code) \
+                    and self.equal_labels(prev_block.labels, block.labels):
                 prev_block.merge_next(block)
                 blocks_to_remove.append(block)
                 changes = True
@@ -483,6 +489,8 @@ class BlockProximityFusion(BoilerpipeFilter):
                     if not prev_block.is_content or not block.is_content:
                         ok = False
                 if self.same_tag_level_only and prev_block.tag_level != block.tag_level:
+                    ok = False
+                if prev_block.is_code or block.is_code:
                     ok = False
                 if ok:
                     prev_block.merge_next(block)

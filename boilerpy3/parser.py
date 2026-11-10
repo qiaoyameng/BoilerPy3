@@ -99,6 +99,33 @@ class BodyTagAction(TagAction):
         return True
 
 
+class PreTagAction(TagAction):
+    """
+    Marks this tag as a preformatted block (this should usually only be set for the <code>&lt;PRE&gt;</code> tag).
+    Text inside is kept verbatim (spaces, tabs and newlines are preserved, CRLF/CR is normalized to LF) and the
+    resulting TextBlock is flagged as code (see TextBlock.is_code), so it is exempt from the regular word-density
+    tokenization and from being fused into ordinary paragraphs.
+    """
+    
+    def start(self, content_handler: 'BoilerpipeBaseParser', tag_name: str, attrs: AttributesImpl) -> bool:
+        content_handler.flush_block()
+        content_handler.flush = False
+        content_handler.in_pre += 1
+        content_handler.current_block_is_code = True
+        return False
+    
+    def end(self, content_handler: 'BoilerpipeBaseParser', tag_name: str) -> bool:
+        if content_handler.in_pre > 0:
+            content_handler.in_pre -= 1
+            if content_handler.in_pre == 0:
+                content_handler.flush_block()
+                content_handler.flush = False
+        return False
+    
+    def changes_tag_level(self) -> bool:
+        return True
+
+
 class InlineWhitespaceTagAction(TagAction):
     """
     Marks this tag a simple "inline" element, which generates whitespace, but no new block.
@@ -297,6 +324,7 @@ class CommonTagActions:
     TA_IGNORABLE_ELEMENT = IgnorableElementTagAction()
     TA_ANCHOR_TEXT = AnchorTextTagAction()
     TA_BODY = BodyTagAction()
+    TA_PRE = PreTagAction()
     TA_INLINE_WHITESPACE = InlineWhitespaceTagAction()
     TA_INLINE_NO_WHITESPACE = InlineTagAction()
     TA_BLOCK_LEVEL = BlockTagAction()
@@ -314,6 +342,7 @@ default_tag_action_map = {
     # "LINK" : CommonTagActions.TA_IGNORABLE_ELEMENT,
     "A": CommonTagActions.TA_ANCHOR_TEXT,
     "BODY": CommonTagActions.TA_BODY,
+    "PRE": CommonTagActions.TA_PRE,
     "STRIKE": CommonTagActions.TA_INLINE_NO_WHITESPACE,
     "U": CommonTagActions.TA_INLINE_NO_WHITESPACE,
     "B": CommonTagActions.TA_INLINE_NO_WHITESPACE,
@@ -409,6 +438,7 @@ class BoilerpipeBaseParser:
         self.in_body = 0
         self.in_anchor = 0
         self.in_ignorable_element = 0
+        self.in_pre = 0
         self.text_element_idx = 0
         self.last_start_tag = None
         self.last_end_tag = None
@@ -438,6 +468,7 @@ class BoilerpipeBaseParser:
         self.in_body = 0
         self.in_anchor = 0
         self.in_ignorable_element = 0
+        self.in_pre = 0
         self.text_element_idx = 0
         self.last_start_tag = None
         self.last_end_tag = None
@@ -473,7 +504,8 @@ class BoilerpipeBaseParser:
                 self.tag_level += 1
         else:
             self.tag_level += 1
-            self.flush = True
+            if self.in_pre == 0:
+                self.flush = True
         self.last_event = self.EVENT_START_TAG
         self.last_start_tag = name
     
@@ -484,10 +516,11 @@ class BoilerpipeBaseParser:
             if tag_action.changes_tag_level():
                 self.tag_level -= 1
         else:
-            self.flush = True
+            if self.in_pre == 0:
+                self.flush = True
             self.tag_level -= 1
         
-        if self.flush:
+        if self.flush and self.in_pre == 0:
             self.flush_block()
         self.last_event = self.EVENT_END_TAG
         self.last_end_tag = name
@@ -499,13 +532,24 @@ class BoilerpipeBaseParser:
     
     def characters(self, content: str) -> None:
         self.text_element_idx += 1
-        if self.flush:
+        if self.flush and self.in_pre == 0:
             self.flush_block()
             self.flush = False
         if self.in_ignorable_element != 0:
             return
         
         if len(content) == 0:
+            return
+        
+        if self.in_pre > 0:
+            # inside a preformatted block: keep the text verbatim, only normalizing line endings to LF
+            content = content.replace('\r\n', '\n').replace('\r', '\n')
+            if self.block_tag_level == -1:
+                self.block_tag_level = self.tag_level
+            self.text_buffer += content
+            self.token_buffer += content
+            self.last_event = self.EVENT_CHARACTERS
+            self.current_contained_text_elements.add(self.text_element_idx)
             return
         
         stripped_content = content.strip()
@@ -540,6 +584,9 @@ class BoilerpipeBaseParser:
             if self.last_start_tag.lower() == "title":
                 self.set_title(self.text_buffer.strip())
             self.clear_text_buffer()
+            return
+        if self.current_block_is_code:
+            self.flush_code_block()
             return
         if len(self.token_buffer.strip()) == 0:
             self.clear_text_buffer()
@@ -594,6 +641,26 @@ class BoilerpipeBaseParser:
         self.add_text_block(tb)
         self.block_tag_level = -1
     
+    def flush_code_block(self) -> None:
+        # drop a single newline directly after the opening tag (HTML5 pre rule) and trailing newlines
+        text = self.text_buffer
+        if text.startswith('\n'):
+            text = text[1:]
+        text = text.rstrip('\n')
+        if len(text.strip()) == 0:
+            self.clear_text_buffer()
+            return
+        # code text is not tokenized into words: word/density statistics stay neutral (0) so that content
+        # classification of this block is driven by the surrounding article context instead
+        tb = TextBlock(text, self.current_contained_text_elements, 0, 0, 0, 1, self.offset_blocks)
+        tb.is_code = True
+        self.current_contained_text_elements = set()
+        self.offset_blocks += 1
+        self.clear_text_buffer()
+        tb.tag_level = self.block_tag_level
+        self.add_text_block(tb)
+        self.block_tag_level = -1
+    
     def add_text_block(self, tb: TextBlock) -> None:
         for font_size in self.font_size_stack[::-1]:
             if font_size is not None:
@@ -627,6 +694,8 @@ class BoilerpipeBaseParser:
         return TextDocument(self.text_blocks, self.title)
     
     def add_whitespace_if_necessary(self) -> None:
+        if self.in_pre > 0:
+            return
         if len(self.text_buffer) == 0 or not self.text_buffer[-1].isspace():
             self.text_buffer += ' '
         if len(self.token_buffer) == 0 or not self.token_buffer[-1].isspace():
@@ -635,6 +704,7 @@ class BoilerpipeBaseParser:
     def clear_text_buffer(self) -> None:
         self.text_buffer = ''
         self.token_buffer = ''
+        self.current_block_is_code = False
     
     def add_token(self, token: str) -> None:
         self.add_whitespace_if_necessary()

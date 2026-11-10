@@ -1,6 +1,14 @@
 # Changelog
 
 
+## Unreleased
+- Adds a code-aware content mode for `<pre>` blocks: whitespace (spaces, tabs, newlines) is preserved verbatim,
+  CRLF/CR line endings are normalized to LF, and HTML entities are decoded exactly once
+- `<pre>` blocks become their own block type (`TextBlock.is_code`) with neutral word/density statistics, are never
+  fused with or split like ordinary paragraphs, and are still classified as content based on the surrounding article
+  context (e.g. a `<pre>` in the page header/navigation is not kept unconditionally)
+
+
 ## 1.0.6
 - Adds `request_kwargs` argument to `Extractor`
 - Adds note about URL content extraction to README
