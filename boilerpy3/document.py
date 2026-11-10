@@ -5,7 +5,129 @@ repository for complete details.
 
 import copy
 import sys
-from typing import List, Set, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
+
+
+class ListInfo:
+    """
+    Describes one HTML list (<ol> or <ul>) found in the source document. Item numbering is fixed at parse time, so
+    removing TextBlocks later (e.g. filtered boilerplate items) does not renumber the surviving items.
+    """
+    
+    def __init__(self, list_id: int, ordered: bool, start: Optional[int] = None, reversed: bool = False,
+                 path: Tuple[int, ...] = ()) -> None:
+        self.list_id = list_id
+        self.ordered = ordered
+        self.start = start
+        self.reversed = reversed
+        # ids of enclosing lists, outermost first, including this list's own id
+        self.path = tuple(path)
+        # number of items that actually produced text (empty items never consume a number)
+        self.num_items = 0
+        # item_index -> explicit <li value="...">
+        self.item_values: Dict[int, int] = {}
+        self._numbers = None
+    
+    def effective_numbers(self) -> Dict[int, int]:
+        """
+        Computes the effective number of every item, honouring start, reversed and explicit li values. A reversed
+        list without an explicit start counts down from the original number of items.
+        """
+        
+        if self._numbers is None:
+            if self.start is not None:
+                start = self.start
+            elif self.reversed:
+                start = self.num_items
+            else:
+                start = 1
+            step = -1 if self.reversed else 1
+            numbers = {}
+            counter = start
+            for idx in range(self.num_items):
+                if idx in self.item_values:
+                    counter = self.item_values[idx]
+                numbers[idx] = counter
+                counter += step
+            self._numbers = numbers
+        return self._numbers
+    
+    def number_for(self, item_index: int) -> Optional[int]:
+        return self.effective_numbers().get(item_index)
+    
+    def __repr__(self) -> str:
+        kind = 'ol' if self.ordered else 'ul'
+        return f"ListInfo(id={self.list_id}, {kind}, start={self.start}, reversed={self.reversed}, " \
+               f"num_items={self.num_items})"
+
+
+class ListItemRef:
+    """
+    Reference from a TextBlock to the list item it (partially) belongs to. Follows the TextBlock through filtering,
+    merging and splitting; line_offset locates the item start within merged multi-line blocks.
+    """
+    
+    __slots__ = ('list_id', 'item_index', 'value', 'is_item_start', 'line_offset')
+    
+    def __init__(self, list_id: int, item_index: int, value: Optional[int] = None, is_item_start: bool = False,
+                 line_offset: int = 0) -> None:
+        self.list_id = list_id
+        self.item_index = item_index
+        self.value = value
+        self.is_item_start = is_item_start
+        self.line_offset = line_offset
+    
+    def at_line(self, line_offset: int) -> 'ListItemRef':
+        return ListItemRef(self.list_id, self.item_index, self.value, self.is_item_start, line_offset)
+    
+    def __repr__(self) -> str:
+        return f"ListItemRef(list={self.list_id}, item={self.item_index}, value={self.value}, " \
+               f"start={self.is_item_start}, line={self.line_offset})"
+
+
+class StructuredContentItem:
+    """
+    One line of content together with its list context: the path of enclosing lists and, for the first line of a
+    list item, the item's effective number.
+    """
+    
+    def __init__(self, text: str, list_path: Tuple[int, ...] = (), number: Optional[int] = None,
+                 ordered: bool = False, is_list_item_start: bool = False) -> None:
+        self.text = text
+        self.list_path = tuple(list_path)
+        self.number = number
+        self.ordered = ordered
+        self.is_list_item_start = is_list_item_start
+        self.depth = len(self.list_path)
+    
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, StructuredContentItem):
+            return NotImplemented
+        return (self.text, self.list_path, self.number, self.ordered, self.is_list_item_start) == \
+               (other.text, other.list_path, other.number, other.ordered, other.is_list_item_start)
+    
+    def __repr__(self) -> str:
+        return f"StructuredContentItem(text={self.text!r}, path={self.list_path}, number={self.number}, " \
+               f"ordered={self.ordered}, start={self.is_list_item_start})"
+
+
+def render_structured_content(items: List[StructuredContentItem]) -> str:
+    """
+    Renders structured content items to plain text, adding list markers (effective numbers for ordered lists,
+    dashes for unordered lists) and indentation by nesting depth.
+    """
+    
+    lines = []
+    for item in items:
+        if item.is_list_item_start:
+            indent = '  ' * (item.depth - 1)
+            marker = f'{item.number}. ' if item.ordered else '- '
+            lines.append(f'{indent}{marker}{item.text}')
+        elif item.depth > 0:
+            lines.append(f"{'  ' * item.depth}{item.text}")
+        else:
+            lines.append(item.text)
+    return ''.join(f'{line}\n' for line in lines)
 
 
 class DefaultLabels:
@@ -32,11 +154,16 @@ class TextBlock:
     EMPTY_END: 'TextBlock'
     
     def __init__(self, text: str, contained_text_elements=None, num_words: int = 0, num_words_in_anchor_text: int = 0,
-                 num_words_in_wrapped_lines: int = 0, num_wrapped_lines: int = 0, offset_blocks: int = 0) -> None:
+                 num_words_in_wrapped_lines: int = 0, num_wrapped_lines: int = 0, offset_blocks: int = 0,
+                 list_path: Tuple[int, ...] = (), list_item_refs: List[ListItemRef] = None) -> None:
         self.is_content = False
         self.labels = set()
         self.num_full_text_words = 0
         self.tag_level = 0
+        # ids of the lists enclosing this block, outermost first
+        self.list_path = tuple(list_path)
+        # references to the list items this block (or parts of it) belongs to
+        self.list_item_refs = list(list_item_refs) if list_item_refs else []
         
         self.text = text
         if contained_text_elements is None:
@@ -67,9 +194,15 @@ class TextBlock:
             return False
     
     def merge_next(self, next_text_block: 'TextBlock') -> None:
+        num_lines_before = self.text.count('\n') + 1 if self.text else 0
         if self.text is None:
             self.text = ""
         self.text = f'{self.text}\n{next_text_block.text}'
+        if next_text_block.list_item_refs:
+            self.list_item_refs = self.list_item_refs + [
+                ref.at_line(ref.line_offset + num_lines_before) for ref in next_text_block.list_item_refs]
+        if not self.list_path:
+            self.list_path = next_text_block.list_path
         self.num_words += next_text_block.num_words
         self.num_words_in_anchor_text += next_text_block.num_words_in_anchor_text
         self.num_words_in_wrapped_lines += next_text_block.num_words_in_wrapped_lines
@@ -139,6 +272,8 @@ class TextBlock:
             clone.labels = self.labels.copy()
         if self.contained_text_elements is not None:
             clone.contained_text_elements = self.contained_text_elements.copy()
+        clone.list_path = tuple(self.list_path)
+        clone.list_item_refs = list(self.list_item_refs)
         
         return clone
 
@@ -152,16 +287,18 @@ class TextDocument:
     A text document, consisting of one or more TextBlocks.
     """
     
-    def __init__(self, text_blocks: List[TextBlock], title: str = None):
+    def __init__(self, text_blocks: List[TextBlock], title: str = None, lists: List[ListInfo] = None):
         """
         Creates a new TextDocument with given TextBlocks and given title.
 
         :param text_blocks: The text blocks of this document.
         :param title: The "main" title for this text document.
+        :param lists: The lists (ol/ul) found in the source document, used for list-aware output.
         """
         
         self.title = title
         self.text_blocks = text_blocks
+        self.lists = list(lists) if lists else []
     
     @property
     def content(self) -> str:
@@ -193,6 +330,54 @@ class TextDocument:
             sb.append(f'{block.text}\n')
         
         return ''.join(sb)
+    
+    @property
+    def list_aware_content(self) -> str:
+        """
+        Returns the TextDocument's content rendered with list markers and indentation derived from the source
+        document's lists. Markers are added at render time only and never affect word counts or densities.
+        
+        :return: The list-aware content text.
+        """
+        
+        return render_structured_content(self.get_structured_content(True, False))
+    
+    def get_structured_content(self, include_content: bool = True,
+                               include_non_content: bool = False) -> List[StructuredContentItem]:
+        """
+        Returns the document's text as structured content items, each carrying the path of enclosing lists and,
+        for the first line of a list item, the item's effective number.
+        
+        :param include_content: Whether to include TextBlocks marked as "content".
+        :param include_non_content: Whether to include TextBlocks marked as "non-content".
+        :return: The structured content items.
+        """
+        
+        lists_by_id = {info.list_id: info for info in self.lists}
+        items = []
+        for block in self.text_blocks:
+            if block.is_content:
+                if not include_content:
+                    continue
+            else:
+                if not include_non_content:
+                    continue
+            start_refs = {}
+            for ref in block.list_item_refs:
+                if ref.is_item_start:
+                    start_refs.setdefault(ref.line_offset, ref)
+            for line_offset, line in enumerate(block.text.split('\n')):
+                ref = start_refs.get(line_offset)
+                if ref is not None and ref.list_id in lists_by_id:
+                    info = lists_by_id[ref.list_id]
+                    number = info.number_for(ref.item_index) if info.ordered else None
+                    items.append(StructuredContentItem(line, info.path, number, info.ordered, True))
+                else:
+                    ordered = False
+                    if block.list_path and block.list_path[-1] in lists_by_id:
+                        ordered = lists_by_id[block.list_path[-1]].ordered
+                    items.append(StructuredContentItem(line, block.list_path, None, ordered, False))
+        return items
     
     @property
     def debug_string(self) -> str:

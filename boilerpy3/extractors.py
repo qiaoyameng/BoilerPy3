@@ -47,6 +47,22 @@ class Extractor:
     def get_content(self, text: str) -> str:
         return self.get_doc(text).content
     
+    def get_list_aware_content(self, text: str) -> str:
+        """
+        Like get_content(), but renders ordered/unordered list markers (honouring ol start/reversed and li value)
+        and nesting indentation into the output text.
+        """
+        
+        return self.get_doc(text).list_aware_content
+    
+    def get_structured_content(self, text: str) -> list:
+        """
+        Returns the content as structured items, each carrying its list path and, for list item starts, the
+        item's effective number.
+        """
+        
+        return self.get_doc(text).get_structured_content()
+    
     def get_content_from_url(self, url: str, request_kwargs: dict = None) -> str:
         return self.get_doc_from_url(url, request_kwargs).content
     

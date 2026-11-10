@@ -237,10 +237,12 @@ class SplitParagraphBlocksFilter(BoilerpipeFilter):
                 continue
             is_content = tb.is_content
             labels = tb.labels
-            for p in paragraphs:
+            for idx, p in enumerate(paragraphs):
                 tb_p = TextBlock(p)
                 tb_p.set_is_content(is_content)
                 tb_p.add_labels(labels)
+                tb_p.list_path = tb.list_path
+                tb_p.list_item_refs = [ref.at_line(0) for ref in tb.list_item_refs if ref.line_offset == idx]
                 blocks_new.append(tb_p)
                 changes = True
         

@@ -69,6 +69,29 @@ content = extractor.get_marked_html('<html><body><h1>Example</h1></body></html>'
 ```
 
 
+### List-Aware Extraction
+
+By default, list markup (`<ol>`, `<ul>`, `<li>`) only affects where text blocks are split; the numbering is lost.
+To keep it, use the list-aware output. It honours `start`/`reversed` on ordered lists and explicit `value` numbers
+on items, preserves nesting as indentation, and keeps each item's original number even when other items are
+filtered out as boilerplate. Markers are added at render time only, so word counts and densities are unaffected.
+
+```python
+from boilerpy3 import extractors
+
+extractor = extractors.ArticleExtractor()
+
+# Rendered text with list markers and indentation
+content = extractor.get_list_aware_content('<html><body><ol start="3"><li>a</li><li>b</li></ol></body></html>')
+
+# Structured items carrying the list path and effective number of each item
+items = extractor.get_structured_content('<html><body><ol start="3"><li>a</li><li>b</li></ol></body></html>')
+```
+
+The same data is available on the document level via `doc.get_structured_content()` and
+`doc.list_aware_content`, while `doc.content` remains unchanged.
+
+
 ### Other
 
 Alternatively, use `get_doc()` to return a Boilerpipe document from which you can get more detailed information.

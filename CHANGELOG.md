@@ -1,6 +1,13 @@
 # Changelog
 
 
+## Unreleased
+- Adds optional list-aware output: `Extractor.get_list_aware_content()` / `Extractor.get_structured_content()`
+  and `TextDocument.list_aware_content` / `TextDocument.get_structured_content()` render `ol`/`ul`/`li` structure
+  with effective item numbers (honouring `start`, `reversed` and `li value`) and nesting indentation, while
+  `get_content()` output remains unchanged
+
+
 ## 1.0.6
 - Adds `request_kwargs` argument to `Extractor`
 - Adds note about URL content extraction to README

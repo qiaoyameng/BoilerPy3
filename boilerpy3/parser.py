@@ -10,9 +10,36 @@ from typing import Dict, Set
 from xml.sax.handler import ContentHandler
 from xml.sax.xmlreader import AttributesImpl
 
-from boilerpy3.document import DefaultLabels, TextBlock, TextDocument
+from boilerpy3.document import DefaultLabels, ListInfo, ListItemRef, TextBlock, TextDocument
 
 logger = getLogger('boilerpy3')
+
+
+def attrs_to_dict(attrs) -> dict:
+    """
+    Normalizes the different attribute representations (HTMLParser's list of tuples, SAX AttributesImpl, dict)
+    to a dict with lower-cased keys.
+    """
+    
+    if attrs is None:
+        return {}
+    if isinstance(attrs, dict):
+        items = attrs.items()
+    elif callable(getattr(attrs, 'getValue', None)):
+        items = ((name, attrs.getValue(name)) for name in attrs.getNames())
+    else:
+        try:
+            items = dict(attrs).items()
+        except (TypeError, ValueError):
+            return {}
+    return {str(key).lower(): value for key, value in items}
+
+
+def parse_int_attribute(value):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 # ----------------------------------------------------------------------------
@@ -140,6 +167,46 @@ class BlockTagAction(TagAction):
         return True
     
     def end(self, content_handler: 'BoilerpipeBaseParser', tag_name: str) -> bool:
+        return True
+    
+    def changes_tag_level(self) -> bool:
+        return True
+
+
+class ListTagAction(TagAction):
+    """
+    Block-level TagAction for <code>&lt;OL&gt;</code>/<code>&lt;UL&gt;</code> which records the list structure
+    (start, reversed, nesting) for list-aware output.
+    """
+    
+    def start(self, content_handler: 'BoilerpipeBaseParser', tag_name: str, attrs: AttributesImpl) -> bool:
+        content_handler.flush_block()
+        content_handler.start_list(tag_name.strip().upper() == 'OL', attrs)
+        return True
+    
+    def end(self, content_handler: 'BoilerpipeBaseParser', tag_name: str) -> bool:
+        content_handler.flush_block()
+        content_handler.end_list()
+        return True
+    
+    def changes_tag_level(self) -> bool:
+        return True
+
+
+class ListItemTagAction(TagAction):
+    """
+    Block-level TagAction for <code>&lt;LI&gt;</code> which tracks list items (including explicit
+    <code>value</code> numbers) for list-aware output.
+    """
+    
+    def start(self, content_handler: 'BoilerpipeBaseParser', tag_name: str, attrs: AttributesImpl) -> bool:
+        content_handler.flush_block()
+        content_handler.start_list_item(attrs)
+        return True
+    
+    def end(self, content_handler: 'BoilerpipeBaseParser', tag_name: str) -> bool:
+        content_handler.flush_block()
+        content_handler.end_list_item()
         return True
     
     def changes_tag_level(self) -> bool:
@@ -301,6 +368,8 @@ class CommonTagActions:
     TA_INLINE_NO_WHITESPACE = InlineTagAction()
     TA_BLOCK_LEVEL = BlockTagAction()
     TA_FONT = FontTagAction()
+    TA_LIST = ListTagAction()
+    TA_LIST_ITEM = ListItemTagAction()
 
 
 default_tag_action_map = {
@@ -333,7 +402,10 @@ default_tag_action_map = {
     "FONT": CommonTagActions.TA_INLINE_NO_WHITESPACE,
     #  could also use TA_FONT
     #  added in 1.1.1
-    "NOSCRIPT": CommonTagActions.TA_IGNORABLE_ELEMENT
+    "NOSCRIPT": CommonTagActions.TA_IGNORABLE_ELEMENT,
+    "OL": CommonTagActions.TA_LIST,
+    "UL": CommonTagActions.TA_LIST,
+    "LI": CommonTagActions.TA_LIST_ITEM
 }
 
 
@@ -377,6 +449,28 @@ class SpecialTokens:
 # ----------------------------------------------------------------------------
 #                           SAX CONTENT HANDLER
 # ----------------------------------------------------------------------------
+
+
+class _ItemContext:
+    """
+    Tracks the currently open <li> of a list. The item index is assigned lazily, when the item produces its first
+    TextBlock, so that empty items never consume a number.
+    """
+    
+    def __init__(self, value) -> None:
+        self.value = value
+        self.index = None
+
+
+class _ListContext:
+    """
+    Tracks an open <ol>/<ul> while parsing.
+    """
+    
+    def __init__(self, info: ListInfo) -> None:
+        self.info = info
+        self.next_index = 0
+        self.current_item = None
 
 
 class BoilerpipeBaseParser:
@@ -426,6 +520,8 @@ class BoilerpipeBaseParser:
         self.font_size_stack = []
         self.text_buffer = ''
         self.token_buffer = ''
+        self.list_stack = []
+        self.list_registry = []
         
         self.raise_on_failure = raise_on_failure
     
@@ -454,6 +550,8 @@ class BoilerpipeBaseParser:
         self.block_tag_level = -1
         self.label_stacks = []
         self.font_size_stack = []
+        self.list_stack = []
+        self.list_registry = []
     
     # ------------------------------- SAX Parser methods ----------------------------------------
     
@@ -537,7 +635,7 @@ class BoilerpipeBaseParser:
     
     def flush_block(self) -> None:
         if self.in_body == 0:
-            if self.last_start_tag.lower() == "title":
+            if self.last_start_tag is not None and self.last_start_tag.lower() == "title":
                 self.set_title(self.text_buffer.strip())
             self.clear_text_buffer()
             return
@@ -591,8 +689,54 @@ class BoilerpipeBaseParser:
         self.offset_blocks += 1
         self.clear_text_buffer()
         tb.tag_level = self.block_tag_level
+        self.attach_list_context(tb)
         self.add_text_block(tb)
         self.block_tag_level = -1
+    
+    def start_list(self, ordered: bool, attrs) -> None:
+        attrs = attrs_to_dict(attrs)
+        start = parse_int_attribute(attrs.get('start'))
+        is_reversed = 'reversed' in attrs
+        list_id = len(self.list_registry)
+        path = tuple(ctx.info.list_id for ctx in self.list_stack) + (list_id,)
+        info = ListInfo(list_id, ordered, start, is_reversed, path)
+        self.list_registry.append(info)
+        self.list_stack.append(_ListContext(info))
+    
+    def end_list(self) -> None:
+        if len(self.list_stack) == 0:
+            return
+        ctx = self.list_stack.pop()
+        ctx.info.num_items = ctx.next_index
+    
+    def start_list_item(self, attrs) -> None:
+        if len(self.list_stack) == 0:
+            return
+        value = parse_int_attribute(attrs_to_dict(attrs).get('value'))
+        self.list_stack[-1].current_item = _ItemContext(value)
+    
+    def end_list_item(self) -> None:
+        if len(self.list_stack) > 0:
+            self.list_stack[-1].current_item = None
+    
+    def attach_list_context(self, tb: TextBlock) -> None:
+        if len(self.list_stack) == 0:
+            return
+        tb.list_path = tuple(ctx.info.list_id for ctx in self.list_stack)
+        ctx = self.list_stack[-1]
+        item = ctx.current_item
+        if item is None:
+            return
+        if item.index is None:
+            item.index = ctx.next_index
+            ctx.next_index += 1
+            if item.value is not None:
+                ctx.info.item_values[item.index] = item.value
+            is_item_start = True
+        else:
+            is_item_start = False
+        tb.list_item_refs.append(ListItemRef(ctx.info.list_id, item.index, item.value if is_item_start else None,
+                                             is_item_start=is_item_start))
     
     def add_text_block(self, tb: TextBlock) -> None:
         for font_size in self.font_size_stack[::-1]:
@@ -624,7 +768,10 @@ class BoilerpipeBaseParser:
         
         #  just to be sure
         self.flush_block()
-        return TextDocument(self.text_blocks, self.title)
+        # finalize lists that were never closed explicitly
+        for ctx in self.list_stack:
+            ctx.info.num_items = ctx.next_index
+        return TextDocument(self.text_blocks, self.title, self.list_registry)
     
     def add_whitespace_if_necessary(self) -> None:
         if len(self.text_buffer) == 0 or not self.text_buffer[-1].isspace():
