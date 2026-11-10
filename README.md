@@ -69,6 +69,28 @@ content = extractor.get_marked_html('<html><body><h1>Example</h1></body></html>'
 ```
 
 
+### Word Counting Strategies
+
+By default, BoilerPy3 counts words with its legacy English-oriented rules, which treat a run of Chinese
+characters as a single word. For Chinese/English mixed text you can pass a document-level counting strategy to
+any extractor. The strategy is applied consistently when text blocks are created, split and merged, so word
+counts, link densities and text densities all follow the same rules.
+
+```python
+from boilerpy3 import extractors
+from boilerpy3.counting import MIXED_CJK_STRATEGY
+
+extractor = extractors.ArticleExtractor(counting_strategy=MIXED_CJK_STRATEGY)
+content = extractor.get_content('<html><body><p>我爱自然语言处理</p></body></html>')
+```
+
+`MixedCjkWordCountingStrategy` needs no third-party tokenizer: each Han character counts as one word, runs of
+Latin letters/digits count as one word (internal apostrophes included), combining marks attach to the preceding
+character, and punctuation is not counted. Wrapped-line densities use a fixed Unicode width convention
+(combining marks 0, East Asian Wide/Fullwidth 2, everything else 1 column). Custom strategies can be built by
+subclassing `boilerpy3.counting.WordCountingStrategy`.
+
+
 ### Other
 
 Alternatively, use `get_doc()` to return a Boilerpipe document from which you can get more detailed information.

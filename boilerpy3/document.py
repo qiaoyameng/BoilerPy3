@@ -7,6 +7,8 @@ import copy
 import sys
 from typing import List, Set, Tuple, Union
 
+from boilerpy3.counting import WordCountingStrategy
+
 
 class DefaultLabels:
     """
@@ -32,13 +34,22 @@ class TextBlock:
     EMPTY_END: 'TextBlock'
     
     def __init__(self, text: str, contained_text_elements=None, num_words: int = 0, num_words_in_anchor_text: int = 0,
-                 num_words_in_wrapped_lines: int = 0, num_wrapped_lines: int = 0, offset_blocks: int = 0) -> None:
+                 num_words_in_wrapped_lines: int = 0, num_wrapped_lines: int = 0, offset_blocks: int = 0,
+                 counting_strategy: WordCountingStrategy = None) -> None:
         self.is_content = False
         self.labels = set()
         self.num_full_text_words = 0
         self.tag_level = 0
         
         self.text = text
+        self.counting_strategy = counting_strategy
+        if counting_strategy is not None and text:
+            # count words/lines from the raw text with the given strategy; explicitly passed counts are ignored
+            stats = counting_strategy.count(text)
+            num_words = stats.num_words
+            num_words_in_anchor_text = stats.num_linked_words
+            num_words_in_wrapped_lines = stats.num_words_in_wrapped_lines
+            num_wrapped_lines = stats.num_wrapped_lines
         if contained_text_elements is None:
             contained_text_elements = set()
         self.contained_text_elements = contained_text_elements
@@ -152,16 +163,19 @@ class TextDocument:
     A text document, consisting of one or more TextBlocks.
     """
     
-    def __init__(self, text_blocks: List[TextBlock], title: str = None):
+    def __init__(self, text_blocks: List[TextBlock], title: str = None,
+                 counting_strategy: WordCountingStrategy = None):
         """
         Creates a new TextDocument with given TextBlocks and given title.
 
         :param text_blocks: The text blocks of this document.
         :param title: The "main" title for this text document.
+        :param counting_strategy: The word counting strategy used for this document (None = legacy default).
         """
         
         self.title = title
         self.text_blocks = text_blocks
+        self.counting_strategy = counting_strategy
     
     @property
     def content(self) -> str:

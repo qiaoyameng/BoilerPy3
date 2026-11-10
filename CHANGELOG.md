@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+- Adds optional document-level word counting strategies (`boilerpy3.counting`), including a mixed
+  Chinese/English strategy (`MixedCjkWordCountingStrategy`) that counts each Han character as one word without
+  third-party tokenizers; the legacy English-oriented rules remain the default
+
+
 ## 1.0.6
 - Adds `request_kwargs` argument to `Extractor`
 - Adds note about URL content extraction to README

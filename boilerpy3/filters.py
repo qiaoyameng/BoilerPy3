@@ -229,6 +229,7 @@ class SplitParagraphBlocksFilter(BoilerpipeFilter):
         changes = False
         blocks = doc.text_blocks
         blocks_new = []
+        counting_strategy = getattr(doc, 'counting_strategy', None)
         for tb in blocks:
             text = tb.text
             paragraphs = self.NEWLINE_REGEX.split(text)
@@ -238,7 +239,11 @@ class SplitParagraphBlocksFilter(BoilerpipeFilter):
             is_content = tb.is_content
             labels = tb.labels
             for p in paragraphs:
-                tb_p = TextBlock(p)
+                if counting_strategy is not None:
+                    # count words/lines of each paragraph with the document's counting strategy
+                    tb_p = TextBlock(p, counting_strategy=counting_strategy)
+                else:
+                    tb_p = TextBlock(p)
                 tb_p.set_is_content(is_content)
                 tb_p.add_labels(labels)
                 blocks_new.append(tb_p)

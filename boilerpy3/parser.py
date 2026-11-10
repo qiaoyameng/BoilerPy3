@@ -10,6 +10,7 @@ from typing import Dict, Set
 from xml.sax.handler import ContentHandler
 from xml.sax.xmlreader import AttributesImpl
 
+from boilerpy3 import counting
 from boilerpy3.document import DefaultLabels, TextBlock, TextDocument
 
 logger = getLogger('boilerpy3')
@@ -370,8 +371,8 @@ class ConditionalLabelAction(LabelAction):
 
 
 class SpecialTokens:
-    ANCHOR_TEXT_START = '\ue00astart'
-    ANCHOR_TEXT_END = '\ue00aend'
+    ANCHOR_TEXT_START = counting.ANCHOR_TEXT_START
+    ANCHOR_TEXT_END = counting.ANCHOR_TEXT_END
 
 
 # ----------------------------------------------------------------------------
@@ -390,20 +391,25 @@ class BoilerpipeBaseParser:
     EVENT_CHARACTERS = 2
     EVENT_WHITESPACE = 3
     # all word characters except underscore -- i.e. not (not word or underscore)
-    PAT_VALID_WORD_CHARACTER = re.compile(r"[^\W_]", re.UNICODE)
-    PAT_WORD = re.compile(r"\ue00a?[\w\"'.,!@\-:;$?()/]+", re.UNICODE)
+    PAT_VALID_WORD_CHARACTER = counting.DefaultWordCountingStrategy.PAT_VALID_WORD_CHARACTER
+    PAT_WORD = counting.DefaultWordCountingStrategy.PAT_WORD
     
-    def __init__(self, tag_actions: Dict[str, TagAction] = None, raise_on_failure: bool = True) -> None:
+    def __init__(self, tag_actions: Dict[str, TagAction] = None, raise_on_failure: bool = True,
+                 counting_strategy: counting.WordCountingStrategy = None) -> None:
         """
         Constructs a BoilerpipeHTMLContentHandler using the given TagActionMap.
         
         :param tag_actions: The TagActionMap to use, e.g. DefaultTagActionMap.
+        :param counting_strategy: The word counting strategy to use for the created TextBlocks
+                                  (None = legacy English-oriented default).
         """
         
         if tag_actions is None:
             self.tag_actions = default_tag_action_map
         else:
             self.tag_actions = tag_actions
+        # None means the legacy default; the effective strategy is resolved via effective_counting_strategy()
+        self.counting_strategy = counting_strategy
         
         self.clear_text_buffer()
         self.in_body = 0
@@ -428,6 +434,12 @@ class BoilerpipeBaseParser:
         self.token_buffer = ''
         
         self.raise_on_failure = raise_on_failure
+    
+    def effective_counting_strategy(self) -> counting.WordCountingStrategy:
+        """
+        Returns the counting strategy actually used for word/line statistics (legacy default if none was set).
+        """
+        return self.counting_strategy if self.counting_strategy is not None else counting.DEFAULT_STRATEGY
     
     def recycle(self) -> None:
         """
@@ -546,47 +558,24 @@ class BoilerpipeBaseParser:
             return
         
         tokens = self.tokenize(self.token_buffer)
-        num_words = 0
-        num_linked_words = 0
-        num_wrapped_lines = 0
-        current_line_length = -1
-        #  don't count the first space
-        max_line_length = 80
-        num_tokens = 0
-        num_words_current_line = 0
-        
+        stats = counting.compute_block_counts(tokens, self.effective_counting_strategy(),
+                                              in_anchor_text=self.in_anchor_text)
+        # anchor text may span block boundaries: carry the anchor state over to the next block
         for token in tokens:
             if token == SpecialTokens.ANCHOR_TEXT_START:
                 self.in_anchor_text = True
             elif token == SpecialTokens.ANCHOR_TEXT_END:
                 self.in_anchor_text = False
-            elif self.is_word(token):
-                num_tokens += 1
-                num_words += 1
-                num_words_current_line += 1
-                if self.in_anchor_text:
-                    num_linked_words += 1
-                current_line_length += len(token) + 1
-                if current_line_length > max_line_length:
-                    num_wrapped_lines += 1
-                    current_line_length = len(token)
-                    num_words_current_line = 1
-            else:
-                num_tokens += 1
         
         # if only special tokens (num_tokens excludes special tokens)
-        if num_tokens == 0:
+        if stats.num_tokens == 0:
             self.clear_text_buffer()
             return
         
-        if num_wrapped_lines == 0:
-            num_words_in_wrapped_lines = num_words
-            num_wrapped_lines = 1
-        else:
-            num_words_in_wrapped_lines = num_words - num_words_current_line
-        
-        tb = TextBlock(self.text_buffer.strip(), self.current_contained_text_elements, num_words, num_linked_words,
-                       num_words_in_wrapped_lines, num_wrapped_lines, self.offset_blocks)
+        tb = TextBlock(self.text_buffer.strip(), self.current_contained_text_elements, stats.num_words,
+                       stats.num_linked_words, stats.num_words_in_wrapped_lines, stats.num_wrapped_lines,
+                       self.offset_blocks)
+        tb.counting_strategy = self.effective_counting_strategy()
         self.current_contained_text_elements = set()
         self.offset_blocks += 1
         self.clear_text_buffer()
@@ -605,10 +594,10 @@ class BoilerpipeBaseParser:
         self.text_blocks.append(tb)
     
     def is_word(self, token: str) -> bool:
-        return self.PAT_VALID_WORD_CHARACTER.search(token) is not None
+        return self.effective_counting_strategy().is_word(token)
     
     def tokenize(self, text: str) -> list:
-        return self.PAT_WORD.findall(text)
+        return self.effective_counting_strategy().tokenize(text)
     
     def set_title(self, s: str) -> None:
         if s is None or len(s) == 0:
@@ -624,7 +613,7 @@ class BoilerpipeBaseParser:
         
         #  just to be sure
         self.flush_block()
-        return TextDocument(self.text_blocks, self.title)
+        return TextDocument(self.text_blocks, self.title, counting_strategy=self.counting_strategy)
     
     def add_whitespace_if_necessary(self) -> None:
         if len(self.text_buffer) == 0 or not self.text_buffer[-1].isspace():
@@ -648,9 +637,9 @@ class BoilerpipeBaseParser:
 
 
 class BoilerpipeHTMLParser(HTMLParser, BoilerpipeBaseParser):
-    def __init__(self, raise_on_failure: bool = True) -> None:
+    def __init__(self, raise_on_failure: bool = True, counting_strategy: counting.WordCountingStrategy = None) -> None:
         HTMLParser.__init__(self)
-        BoilerpipeBaseParser.__init__(self, raise_on_failure=raise_on_failure)
+        BoilerpipeBaseParser.__init__(self, raise_on_failure=raise_on_failure, counting_strategy=counting_strategy)
     
     def feed(self, data: str) -> None:
         self.start_document()
@@ -671,6 +660,6 @@ class BoilerpipeHTMLParser(HTMLParser, BoilerpipeBaseParser):
 
 
 class BoilerpipeSAXContentHandler(ContentHandler, BoilerpipeBaseParser):
-    def __init__(self, raise_on_failure: bool = True) -> None:
+    def __init__(self, raise_on_failure: bool = True, counting_strategy: counting.WordCountingStrategy = None) -> None:
         ContentHandler.__init__(self)
-        BoilerpipeBaseParser.__init__(self, raise_on_failure=raise_on_failure)
+        BoilerpipeBaseParser.__init__(self, raise_on_failure=raise_on_failure, counting_strategy=counting_strategy)

@@ -29,17 +29,22 @@ class Extractor:
     
     SCRIPT_REGEX = re.compile(r'<(?:script|SCRIPT)[^>]*>.*?</(?:script|SCRIPT)>', re.DOTALL)
     
-    def __init__(self, filtr: BoilerpipeFilter, raise_on_failure: bool = True, request_kwargs: dict = None) -> None:
+    def __init__(self, filtr: BoilerpipeFilter, raise_on_failure: bool = True, request_kwargs: dict = None,
+                 counting_strategy=None) -> None:
         """
         Initialize extractor
 
         :param filtr: filter
         :param raise_on_failure: whether or not to raise an exception if a text extraction failure is encountered.
         :param request_kwargs: kwargs to pass to urllib.request
+        :param counting_strategy: word counting strategy for the parsed document (None = legacy English-oriented
+                                  default); see boilerpy3.counting, e.g. MixedCjkWordCountingStrategy for
+                                  Chinese/English mixed text
         """
         
         self.filter = filtr
         self.raise_on_failure = raise_on_failure
+        self.counting_strategy = counting_strategy
         if request_kwargs is None:
             request_kwargs = {}
         self._request_kwargs = request_kwargs
@@ -103,12 +108,14 @@ class Extractor:
             return 'utf8'
     
     def parse_doc(self, input_str: str) -> Union[TextDocument, None]:
-        bp_parser = parser.BoilerpipeHTMLParser(raise_on_failure=self.raise_on_failure)
+        bp_parser = parser.BoilerpipeHTMLParser(raise_on_failure=self.raise_on_failure,
+                                                counting_strategy=self.counting_strategy)
         try:
             bp_parser.feed(input_str)
         except:
             # in case of error, try again, first removing script tag content
-            bp_parser = parser.BoilerpipeHTMLParser(raise_on_failure=self.raise_on_failure)
+            bp_parser = parser.BoilerpipeHTMLParser(raise_on_failure=self.raise_on_failure,
+                                                counting_strategy=self.counting_strategy)
             input_str = self.SCRIPT_REGEX.sub('<script></script>', input_str)
             try:
                 bp_parser.feed(input_str)
@@ -133,15 +140,17 @@ class DefaultExtractor(Extractor):
         filters.DensityRulesClassifier()
     ])
     
-    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None) -> None:
+    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None,
+                 counting_strategy=None) -> None:
         """
         Initialize extractor
 
         :param raise_on_failure: whether or not to raise an exception if a text extraction failure is encountered.
         :param request_kwargs: kwargs to pass to urllib.request
+        :param counting_strategy: word counting strategy for the parsed document (None = legacy default)
         """
         
-        super().__init__(self._filter_chain, raise_on_failure, request_kwargs)
+        super().__init__(self._filter_chain, raise_on_failure, request_kwargs, counting_strategy)
 
 
 class ArticleExtractor(Extractor):
@@ -162,15 +171,17 @@ class ArticleExtractor(Extractor):
         filters.ExpandTitleToContentFilter()
     ])
     
-    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None) -> None:
+    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None,
+                 counting_strategy=None) -> None:
         """
         Initialize extractor
 
         :param raise_on_failure: whether or not to raise an exception if a text extraction failure is encountered.
         :param request_kwargs: kwargs to pass to urllib.request
+        :param counting_strategy: word counting strategy for the parsed document (None = legacy default)
         """
         
-        super().__init__(self._filter_chain, raise_on_failure, request_kwargs)
+        super().__init__(self._filter_chain, raise_on_failure, request_kwargs, counting_strategy)
 
 
 class LargestContentExtractor(Extractor):
@@ -186,15 +197,17 @@ class LargestContentExtractor(Extractor):
         filters.KeepLargestBlockFilter()
     ])
     
-    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None) -> None:
+    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None,
+                 counting_strategy=None) -> None:
         """
         Initialize extractor
 
         :param raise_on_failure: whether or not to raise an exception if a text extraction failure is encountered.
         :param request_kwargs: kwargs to pass to urllib.request
+        :param counting_strategy: word counting strategy for the parsed document (None = legacy default)
         """
         
-        super().__init__(self._filter_chain, raise_on_failure, request_kwargs)
+        super().__init__(self._filter_chain, raise_on_failure, request_kwargs, counting_strategy)
 
 
 class CanolaExtractor(Extractor):
@@ -204,15 +217,17 @@ class CanolaExtractor(Extractor):
     
     _filter = filters.CanolaFilter()
     
-    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None) -> None:
+    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None,
+                 counting_strategy=None) -> None:
         """
         Initialize extractor
 
         :param raise_on_failure: whether or not to raise an exception if a text extraction failure is encountered.
         :param request_kwargs: kwargs to pass to urllib.request
+        :param counting_strategy: word counting strategy for the parsed document (None = legacy default)
         """
         
-        super().__init__(self._filter, raise_on_failure, request_kwargs)
+        super().__init__(self._filter, raise_on_failure, request_kwargs, counting_strategy)
 
 
 class KeepEverythingExtractor(Extractor):
@@ -223,15 +238,17 @@ class KeepEverythingExtractor(Extractor):
     
     _filter = filters.MarkEverythingContentFilter()
     
-    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None) -> None:
+    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None,
+                 counting_strategy=None) -> None:
         """
         Initialize extractor
 
         :param raise_on_failure: whether or not to raise an exception if a text extraction failure is encountered.
         :param request_kwargs: kwargs to pass to urllib.request
+        :param counting_strategy: word counting strategy for the parsed document (None = legacy default)
         """
         
-        super().__init__(self._filter, raise_on_failure, request_kwargs)
+        super().__init__(self._filter, raise_on_failure, request_kwargs, counting_strategy)
 
 
 class NumWordsRulesExtractor(Extractor):
@@ -242,15 +259,17 @@ class NumWordsRulesExtractor(Extractor):
     
     _filter = filters.NumWordsRulesClassifier()
     
-    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None) -> None:
+    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None,
+                 counting_strategy=None) -> None:
         """
         Initialize extractor
 
         :param raise_on_failure: whether or not to raise an exception if a text extraction failure is encountered.
         :param request_kwargs: kwargs to pass to urllib.request
+        :param counting_strategy: word counting strategy for the parsed document (None = legacy default)
         """
         
-        super().__init__(self._filter, raise_on_failure, request_kwargs)
+        super().__init__(self._filter, raise_on_failure, request_kwargs, counting_strategy)
 
 
 class ArticleSentencesExtractor(Extractor):
@@ -264,15 +283,17 @@ class ArticleSentencesExtractor(Extractor):
         filters.MinClauseWordsFilter()
     ])
     
-    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None) -> None:
+    def __init__(self, raise_on_failure: bool = True, request_kwargs: dict = None,
+                 counting_strategy=None) -> None:
         """
         Initialize extractor
 
         :param raise_on_failure: whether or not to raise an exception if a text extraction failure is encountered.
         :param request_kwargs: kwargs to pass to urllib.request
+        :param counting_strategy: word counting strategy for the parsed document (None = legacy default)
         """
         
-        super().__init__(self._filter_chain, raise_on_failure, request_kwargs)
+        super().__init__(self._filter_chain, raise_on_failure, request_kwargs, counting_strategy)
 
 
 class KeepEverythingWithMinKWordsFilter(filters.FilterChain):
