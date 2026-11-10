@@ -1,6 +1,16 @@
 # Changelog
 
 
+## Unreleased
+- Adds an incremental parsing lifecycle: `BoilerpipeHTMLParser.begin()`,
+  `feed_chunk()` and `finish()`, plus `parser.parse_chunks()` and
+  `Extractor.get_doc_from_chunks()`, for parsing HTML delivered in chunks without
+  re-joining it. Chunk boundaries are transparent, so text, word counts, link
+  density, labels and the content judgement are identical to the one-shot parse.
+- Adds `abort()` to discard an in-progress document; finished and aborted parsers
+  cannot be reused until `begin()` resets all counters, buffers and label stacks.
+- The one-shot `feed()`/`get_doc()` results are unchanged.
+
 ## 1.0.6
 - Adds `request_kwargs` argument to `Extractor`
 - Adds note about URL content extraction to README

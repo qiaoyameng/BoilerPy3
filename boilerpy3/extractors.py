@@ -63,6 +63,21 @@ class Extractor:
         doc = self.parse_doc(text)
         self.filter.process(doc)
         return doc
+
+    def get_doc_from_chunks(self, chunks) -> TextDocument:
+        """
+        Parse an HTML document streamed as an iterable of chunks and run the
+        extractor's filter chain against it. The chunks are never re-joined into
+        a full HTML string; chunk boundaries do not change the result compared
+        with :meth:`get_doc`.
+
+        :param chunks: iterable of HTML fragments, in document order.
+        :return: the filtered :class:`TextDocument`.
+        """
+
+        doc = parser.parse_chunks(chunks, raise_on_failure=self.raise_on_failure)
+        self.filter.process(doc)
+        return doc
     
     def get_marked_html(self, text: str) -> str:
         doc = self.get_doc(text)

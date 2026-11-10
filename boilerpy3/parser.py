@@ -4,6 +4,7 @@ repository for complete details.
 """
 
 import re
+from html import unescape
 from html.parser import HTMLParser
 from logging import getLogger
 from typing import Dict, Set
@@ -13,6 +14,16 @@ from xml.sax.xmlreader import AttributesImpl
 from boilerpy3.document import DefaultLabels, TextBlock, TextDocument
 
 logger = getLogger('boilerpy3')
+
+
+# ----------------------------------------------------------------------------
+#                     INCREMENTAL PARSING ENTITY DETECTION
+# ----------------------------------------------------------------------------
+
+# An entity reference the stdlib HTMLParser is still waiting to complete.
+# The trailing forms (``&``, ``&a``, ``&#`` ...) stay buffered across feeds.
+PENDING_ENTITY_NAME = re.compile(r'&[a-zA-Z][-.a-zA-Z0-9]*$')
+PENDING_ENTITY_NUM = re.compile(r'&#(?:[xX][0-9a-fA-F]*|[0-9]*)$')
 
 
 # ----------------------------------------------------------------------------
@@ -389,6 +400,11 @@ class BoilerpipeBaseParser:
     EVENT_END_TAG = 1
     EVENT_CHARACTERS = 2
     EVENT_WHITESPACE = 3
+    # parsing lifecycle states
+    STATE_IDLE = 0
+    STATE_PARSING = 1
+    STATE_FINISHED = 2
+    STATE_ABORTED = 3
     # all word characters except underscore -- i.e. not (not word or underscore)
     PAT_VALID_WORD_CHARACTER = re.compile(r"[^\W_]", re.UNICODE)
     PAT_WORD = re.compile(r"\ue00a?[\w\"'.,!@\-:;$?()/]+", re.UNICODE)
@@ -428,6 +444,13 @@ class BoilerpipeBaseParser:
         self.token_buffer = ''
         
         self.raise_on_failure = raise_on_failure
+        self.lifecycle_state = self.STATE_IDLE
+        # decoded text fragments of the text region currently open between two
+        # markup events; used to make chunk boundaries invisible to characters()
+        self._text_region = []
+        self._text_region_is_cdata = False
+        # raw bytes parked because a feed ended on an incomplete entity
+        self._parked_raw = ''
     
     def recycle(self) -> None:
         """
@@ -454,6 +477,215 @@ class BoilerpipeBaseParser:
         self.block_tag_level = -1
         self.label_stacks = []
         self.font_size_stack = []
+
+    # ------------------------- INCREMENTAL LIFECYCLE -------------------------
+
+    def begin(self) -> None:
+        """
+        Begins a fresh document, discarding every counter, buffer and label
+        stack left over from a previous document.
+
+        :raises RuntimeError: if the parser is already mid-document.
+        """
+
+        if self.lifecycle_state == self.STATE_PARSING:
+            raise RuntimeError("begin() called while a document is already being parsed")
+        self.recycle()
+        self._text_region = []
+        self._text_region_is_cdata = False
+        self._parked_raw = ''
+        self.lifecycle_state = self.STATE_PARSING
+        self.start_document()
+
+    def finish(self) -> 'TextDocument':
+        """
+        Finalises the document exactly once and returns the parsed
+        :class:`TextDocument`. After this call the parser cannot be reused
+        without another :meth:`begin`.
+
+        :raises RuntimeError: if no document is open or it was already finalised.
+        """
+
+        if self.lifecycle_state != self.STATE_PARSING:
+            raise RuntimeError("finish() called without an in-progress document")
+        self._finalize_buffered_input()
+        self._flush_text_region()
+        self.end_document()
+        self.lifecycle_state = self.STATE_FINISHED
+        return self.to_text_document()
+
+    def abort(self) -> None:
+        """
+        Abandons the current document. Any buffered state is discarded and the
+        parser is marked unusable until the next :meth:`begin`.
+        """
+
+        if self.lifecycle_state != self.STATE_PARSING:
+            raise RuntimeError("abort() called without an in-progress document")
+        self.recycle()
+        self._text_region = []
+        self._text_region_is_cdata = False
+        self._parked_raw = ''
+        self.lifecycle_state = self.STATE_ABORTED
+
+    def _require_parsing(self, method_name: str) -> None:
+        if self.lifecycle_state == self.STATE_IDLE:
+            raise RuntimeError(f"{method_name} called before begin()")
+        if self.lifecycle_state in (self.STATE_FINISHED, self.STATE_ABORTED):
+            raise RuntimeError(
+                f"{method_name} called on a parser whose document was already "
+                f"{'finished' if self.lifecycle_state == self.STATE_FINISHED else 'aborted'}"
+            )
+
+    # -------------------- CHUNK-BOUNDARY TEXT RECONSTRUCTION --------------------
+
+    def _ingest_chunk(self, data: str) -> None:
+        """
+        Feeds one raw chunk through the stdlib parser while hiding chunk
+        boundaries from the document model.
+
+        The stdlib parser can leave text parked in ``rawdata`` when a feed ends
+        on an incomplete entity; once parked that buffer is sometimes never
+        re-delivered. Such a buffer is parked intact and re-injected in front of
+        the next chunk so the parser always sees a contiguous byte stream.
+        """
+
+        if self._parked_raw:
+            data = self._parked_raw + data
+            self._parked_raw = ''
+            self.rawdata = ''
+
+        HTMLParser.feed(self, data)
+
+        if self._is_stuck_text_buffer():
+            self._parked_raw = self.rawdata
+            self.rawdata = ''
+            return
+        self._drain_buffered_text()
+
+    def _finalize_buffered_input(self) -> None:
+        """
+        Flushes everything the stdlib parser still holds at end of document.
+
+        Small trailing chunks may sit in the parser's private ``_pending`` list
+        rather than ``rawdata``; they are folded in first. Any buffered markup
+        (including a split CDATA closing tag) is then driven to completion. A
+        pure-text region still waiting on an incomplete entity is dropped,
+        matching one-shot ``feed()`` semantics.
+        """
+
+        if self._pending:
+            self.rawdata += ''.join(self._pending)
+            self._pending.clear()
+            self._pending_len = 0
+
+        raw = self.rawdata
+        if raw and '<' in raw:
+            self.goahead(1)
+            self._drain_buffered_text()
+            raw = self.rawdata
+
+        if self._parked_raw or (raw and raw[0] != '<' and '<' not in raw
+                                and self._is_pending_entity(raw)):
+            # One-shot feed() leaves a region still waiting on an entity un-emitted.
+            self._text_region = []
+            self._text_region_is_cdata = False
+            self._parked_raw = ''
+            self.rawdata = ''
+            return
+
+    def _is_stuck_text_buffer(self) -> bool:
+        raw = self.rawdata
+        if not raw or raw[0] == '<' or self.cdata_elem is not None:
+            return False
+        return self._is_pending_entity(raw)
+
+    def _drain_buffered_text(self) -> None:
+        """
+        Forwards completed text parked in ``rawdata`` to the open text region.
+        Incomplete markup and entity tokens stay buffered for the next chunk.
+        """
+
+        raw = self.rawdata
+        if not raw or raw[0] == '<':
+            return
+
+        if self.cdata_elem is not None and not self._escapable:
+            # Raw CDATA (script/style ...) keeps entities verbatim; a split
+            # closing tag remains buffered.
+            lt = raw.rfind('<')
+            if lt < 0:
+                self.rawdata = ''
+                self._append_text_region(raw, is_cdata=True)
+            else:
+                self.rawdata = raw[lt:]
+                self._append_text_region(raw[:lt], is_cdata=True)
+            return
+
+        lt = raw.rfind('<')
+        if lt >= 0:
+            self.rawdata = raw[lt:]
+            self._drain_pcdata_text(raw[:lt])
+            return
+
+        self.rawdata = ''
+        self._drain_pcdata_text(raw)
+
+    def _drain_pcdata_text(self, raw: str) -> None:
+        if not raw:
+            return
+        amp = raw.rfind('&')
+        if amp < 0:
+            self._append_text_region(raw, is_cdata=False)
+            return
+        suffix = raw[amp:]
+        if self._is_pending_entity(suffix):
+            # Keep the incomplete entity suffix buffered for the next chunk.
+            self.rawdata = suffix
+            self._append_text_region(raw[:amp], is_cdata=False)
+        else:
+            self._append_text_region(raw, is_cdata=False)
+
+    @staticmethod
+    def _is_pending_entity(text: str) -> bool:
+        lt = text.rfind('<')
+        candidate = text if lt < 0 else text[:lt]
+        amp = candidate.rfind('&')
+        if amp < 0:
+            return False
+        suffix = candidate[amp:]
+        if suffix == '&':
+            return True
+        return PENDING_ENTITY_NAME.match(suffix) is not None or PENDING_ENTITY_NUM.match(suffix) is not None
+
+    def _append_text_region(self, raw: str, is_cdata: bool) -> None:
+        if not raw:
+            return
+        if self._text_region and self._text_region_is_cdata != is_cdata:
+            raise AssertionError("inconsistent text region mode across chunk boundary")
+        self._text_region_is_cdata = is_cdata
+        self._text_region.append(raw if is_cdata else unescape(raw))
+
+    def _flush_text_region(self) -> None:
+        self._drain_buffered_text()
+        if self._text_region:
+            text = ''.join(self._text_region)
+            self._text_region = []
+            self._text_region_is_cdata = False
+            self.characters(text)
+
+    def _close_text_region(self) -> None:
+        """
+        Closes the open text region at a markup event without touching the
+        stdlib parser's ``rawdata`` (which is unsafe while ``goahead`` is
+        actively walking its internal buffer).
+        """
+
+        if self._text_region:
+            text = ''.join(self._text_region)
+            self._text_region = []
+            self._text_region_is_cdata = False
+            self.characters(text)
     
     # ------------------------------- SAX Parser methods ----------------------------------------
     
@@ -652,25 +884,124 @@ class BoilerpipeHTMLParser(HTMLParser, BoilerpipeBaseParser):
         HTMLParser.__init__(self)
         BoilerpipeBaseParser.__init__(self, raise_on_failure=raise_on_failure)
     
+    # -------------------- INCREMENTAL LIFECYCLE ENTRY POINTS --------------------
+
+    def begin(self) -> None:
+        """
+        Opens a new document. The underlying HTML parser is reset so counters,
+        buffers and the tag stack never leak across documents.
+        """
+
+        BoilerpipeBaseParser.begin(self)
+        HTMLParser.reset(self)
+        self.lifecycle_state = self.STATE_PARSING
+
+    def feed_chunk(self, data: str) -> None:
+        """
+        Feeds one arbitrary chunk of the document. Chunk boundaries are
+        transparent: tags, entities, comments, CDATA content and words may be
+        split freely without changing the parsed result.
+        """
+
+        self._require_parsing('feed_chunk()')
+        try:
+            self._ingest_chunk(data)
+            # Text stays in the open region until a markup event (or finish)
+            # closes it, mirroring the one-shot characters() call count.
+        except BaseException:
+            # a failed parse cannot be resumed or finalised
+            self._mark_aborted()
+            raise
+
+    def finish(self) -> 'TextDocument':
+        """
+        Finalises the document once and returns its :class:`TextDocument`.
+        """
+
+        self._require_parsing('finish()')
+        return BoilerpipeBaseParser.finish(self)
+
+    def abort(self) -> None:
+        """Abandons the current document and renders this parser unusable."""
+
+        self._require_parsing('abort()')
+        self._mark_aborted()
+
+    def _mark_aborted(self) -> None:
+        """Discards all state after a failure or explicit abort."""
+
+        BoilerpipeBaseParser.abort(self)
+        HTMLParser.reset(self)
+        self.lifecycle_state = self.STATE_ABORTED
+
     def feed(self, data: str) -> None:
-        self.start_document()
-        HTMLParser.feed(self, data)
-        self.end_document()
+        """
+        One-shot convenience entry point, kept byte-for-byte compatible with the
+        previous behaviour: it parses a complete document in a single pass.
+        """
+
+        self.begin()
+        try:
+            self._ingest_chunk(data)
+            self._finalize_buffered_input()
+            self._flush_text_region()
+            self.end_document()
+        except BaseException:
+            self._mark_aborted()
+            raise
+        self.lifecycle_state = self.STATE_FINISHED
     
     def handle_starttag(self, tag: str, attrs: AttributesImpl) -> None:
+        # NOTE: do not touch rawdata here; goahead() still holds local parsing
+        # state. Region boundaries are reconciled after each feed instead.
+        self._close_text_region()
         self.start_element(tag, attrs)
     
     def handle_startendtag(self, tag, attrs):
         pass
     
     def handle_endtag(self, tag: str) -> None:
+        self._close_text_region()
         self.end_element(tag)
     
     def handle_data(self, data: str) -> None:
-        self.characters(data)
+        is_cdata = self.cdata_elem is not None and not self._escapable
+        self._append_text_region(data, is_cdata=is_cdata)
+
+    def handle_comment(self, data: str) -> None:
+        self._close_text_region()
+
+    def handle_decl(self, decl: str) -> None:
+        self._close_text_region()
+
+    def handle_pi(self, data: str) -> None:
+        self._close_text_region()
+
+    def unknown_decl(self, data: str) -> None:
+        self._close_text_region()
 
 
 class BoilerpipeSAXContentHandler(ContentHandler, BoilerpipeBaseParser):
     def __init__(self, raise_on_failure: bool = True) -> None:
         ContentHandler.__init__(self)
         BoilerpipeBaseParser.__init__(self, raise_on_failure=raise_on_failure)
+
+
+def parse_chunks(chunks, raise_on_failure: bool = True) -> 'TextDocument':
+    """
+    Parse an HTML document delivered as an iterable of chunks.
+
+    Chunk boundaries are transparent: tags, entities, comments, CDATA content
+    and words may be split across chunks without affecting the resulting
+    :class:`TextDocument`. This never re-assembles the full HTML string.
+
+    :param chunks: iterable of HTML fragments, in document order.
+    :param raise_on_failure: whether to raise on malformed input.
+    :return: the parsed :class:`TextDocument`.
+    """
+
+    bp_parser = BoilerpipeHTMLParser(raise_on_failure=raise_on_failure)
+    bp_parser.begin()
+    for chunk in chunks:
+        bp_parser.feed_chunk(chunk)
+    return bp_parser.finish()

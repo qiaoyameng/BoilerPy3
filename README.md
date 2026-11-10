@@ -49,6 +49,37 @@ content = extractor.get_content('<html><body><h1>Example</h1></body></html>')
 ```
 
 
+### Incremental / Chunked Extraction
+
+When the HTML is delivered incrementally (for example by a streaming downloader),
+feed the chunks one at a time instead of buffering the whole document. The parser
+hides chunk boundaries completely, so tags, entities, comments, script content and
+words may be split across chunks without changing the resulting text, word counts,
+link density, labels or the final content judgement.
+
+```python
+from boilerpy3 import extractors
+from boilerpy3.parser import BoilerpipeHTMLParser
+
+extractor = extractors.ArticleExtractor()
+
+# Drive the parser lifecycle directly: begin -> feed_chunk -> finish
+parser = BoilerpipeHTMLParser()
+parser.begin()
+for chunk in response.iter_content(decode_unicode=True):
+    parser.feed_chunk(chunk)
+document = parser.finish()
+extractor.filter.process(document)
+content = document.content
+
+# Or pass any iterable of chunks straight to the extractor
+document = extractor.get_doc_from_chunks(chunks)
+```
+
+`finish()` finalises the document exactly once. Use `abort()` to discard an
+in-progress document; a finished or aborted parser cannot be reused until `begin()`
+starts a fresh document, which clears every counter, buffer and label stack.
+
 ### Marked HTML Extraction
 
 To extract the HTML chunks containing filtered text, use the `get_marked_html()` methods.

@@ -21,6 +21,11 @@ class AnotherBoilerPipeHTMLParser(BoilerpipeHTMLParser):
     def handle_starttag(self, tag: str, attributes) -> None:
         self.start_element(tag, AttributesImpl(dict(attributes)))
 
+    def handle_data(self, data: str) -> None:
+        # The marker rebuilds HTML directly and indexes every character event,
+        # so it bypasses the document parser's chunk-reassembly buffering.
+        self.characters(data)
+
 
 class HTMLBoilerpipeMarker:
     ALLOWED_ATTRIBUTES = {'class', 'href', 'src'}
