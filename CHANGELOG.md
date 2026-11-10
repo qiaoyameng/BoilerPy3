@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+- Adds trainable repeated-block template filter (`boilerpy3.template`): per-page-id idempotent training with
+  contribution rollback, configurable text normalization/structural-context signatures, short-block protection and
+  link-density conditions, versioned JSON models without HTML content, and a `TemplateBoilerplateFilter` that
+  plugs into any `FilterChain`
+
 
 ## 1.0.6
 - Adds `request_kwargs` argument to `Extractor`

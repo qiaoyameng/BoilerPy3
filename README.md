@@ -83,6 +83,64 @@ content = doc.content
 title = doc.title
 ```
 
+### Trainable Repeated-Block (Template) Filter
+
+Single-page density rules cannot tell site-wide chrome (navigation, copyright footers, recommendation rails) apart
+from article text. `boilerpy3.template` learns which blocks recur across a small batch of same-site pages and then
+removes them from new pages.
+
+Training is keyed by a stable page-id supplied by the caller. Each document contributes at most once per block
+signature, re-training the same page-id is idempotent, and replacing or removing a sample revokes its previous
+contribution. A block is only judged a template when it reaches both the minimum supporting-document count and
+support ratio; short-block protection and an inclusive link-density window are configurable. The model is stored as
+versioned JSON containing signature hashes and decision evidence only (never HTML or block text); loading rejects
+unknown versions or a mismatched normalization configuration.
+
+```python
+from boilerpy3 import filters
+from boilerpy3.extractors import Extractor
+from boilerpy3.template import (
+    NormalizationConfig,
+    TemplateBoilerplateFilter,
+    TemplateFilterConfig,
+    TemplateModel,
+    TemplateModelTrainer,
+)
+
+extractor = Extractor(None)
+trainer = TemplateModelTrainer(
+    normalization_config=NormalizationConfig(),
+    filter_config=TemplateFilterConfig(
+        min_support_docs=3,
+        min_support_ratio=0.5,
+        short_block_max_words=3,
+        min_link_density=0.0,
+        max_link_density=1.0,
+    ),
+)
+
+# training batch: caller owns the stable page-ids
+for page_id, html in training_pages.items():
+    trainer.add_document(page_id, extractor.parse_doc(html))
+
+model = trainer.build_model()
+model.save('site-template.json')
+
+# replacing or removing a sample changes the counts instead of leaving stale residue
+trainer.remove_document('old-page-id')
+trainer.add_document('new-page-id', extractor.parse_doc(new_html))
+trainer.build_model().save('site-template.json')
+
+# application: no training statistics are mutated, and the filter fits any FilterChain
+chain = filters.FilterChain([
+    filters.MarkEverythingContentFilter(),
+    TemplateBoilerplateFilter(TemplateModel.load('site-template.json')),
+])
+doc = extractor.parse_doc(unseen_html)
+chain.process(doc)
+print(doc.content)
+```
+
 
 ## Extractors
 
